@@ -204,25 +204,6 @@ def GetMorningstarPerformanceTabData_Annual():
 
     StashDataSet(g.current_trading_symbol, 'Annual Returns', output_data)
 
-    #if g.current_trading_symbol in output_data:
-    #    StashDataRow(g.current_trading_symbol, 'Annual Returns', 'Total Return %',
-    #        output_data[g.current_trading_symbol], '%')
-    #else:
-    #    StashDataRow(g.current_trading_symbol, 'Annual Returns', 'Total Return %',
-    #        output_data[g.current_trading_symbol + ' (NAV)'], '%')
-
-    #if 'Dividend Yield %' in output_data:
-    #    StashDataRow(g.current_trading_symbol, 'Annual Returns', 'Dividend Yield %',
-    #        output_data['Dividend Yield %'], '%')
-    #    StashDataRow(g.current_trading_symbol, 'Annual Returns', 'Taxable Distribution Yield %',
-    #        output_data['Dividend Yield %'], '%')
-
-    #if 'Income USD' in output_data:
-    #    StashDataRow(g.current_trading_symbol, 'Annual Returns', 'Income', output_data['Income USD'])
-
-    #if 'Capital Gains USD' in output_data:
-    #    StashDataRow(g.current_trading_symbol, 'Annual Returns', 'Capital Gain', output_data['Capital Gains USD'])
-
 
 def GetMorningstarPerformanceTabData_Trailing():
     global g
