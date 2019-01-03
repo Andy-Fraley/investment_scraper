@@ -238,10 +238,10 @@ def GetMorningstarPerformanceTabData_Trailing():
         return_as_of_string = return_as_of[len(return_as_of)-1].parent.text
         match = re.search(r'(?P<month>[0-9]+)/(?P<day>[0-9]+)/(?P<year>[0-9]+)', return_as_of_string)
         if match is not None:
-            date_string = 'Trailing returns as of ' + match.group('month') + '/' + match.group('day') + '/' + \
+            date_string = 'Trailing Returns As Of ' + match.group('month') + '/' + match.group('day') + '/' + \
                 match.group('year')
         else:
-            date_string = 'Trailing returns as of <unknown date...see file timestamp for approximate>'
+            date_string = 'Trailing Returns As Of <unknown date...see file timestamp for approximate>'
 
     tr_node = trp[len(trp)-1].parent.parent
     intervals = [x.text for x in tr_node.find_all('th')[1:]]
