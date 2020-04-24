@@ -6,6 +6,7 @@ util/settings.py
 # Any files in local tmp or bak or venv directories
 tmp/
 bak/
+symbols/
 venv*/
 
 #######################################################################################################################

@@ -6,20 +6,131 @@ import datetime
 import sys
 import os
 import time
-import re
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
-from bs4 import BeautifulSoup
-import requests
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 import json
 
 
-def FixStatName(ticker, stat_name):
-    if re.match('^' + ticker.upper() + '(\s+\(PRICE\))?$', stat_name.upper()):
-        stat_name = 'Price'
-    elif re.match('^' + ticker.upper()  + '\s+\(NAV\)$', stat_name.upper()):
-        stat_name = 'NAV'
-    return stat_name
+# Fake class only for purpose of limiting global namespace to the 'g' object
+class g:
+    args = None
+    driver = None
+    symbols = None
+    debug_html_file = None
+    debug_html_filename = None
+    current_trading_symbol = None
+    current_symbol_type = None
+    timestamp = None
+    investment_data = {}
+    debug_file_incrementor = 1
+    trading_symbol_urls = {}
+    wait_element = 10
+    wait_page = 60
+
+
+def WaitClick(locator, time_in_secs=None):
+    global g
+
+    if time_in_secs is None:
+        time_in_secs = g.wait_element
+    element = WebDriverWait(g.driver, time_in_secs).until(EC.element_to_be_clickable(locator))
+    element.click()
+    return element
+
+
+def WaitFloat(locator, time_in_secs=None, retries=5, wait_time_per_retry=1):
+    global g
+
+    if time_in_secs is None:
+        time_in_secs = g.wait_element
+    element = WebDriverWait(g.driver, time_in_secs).until(EC.visibility_of_element_located(locator))
+    while retries > 0:
+        element_text = element.get_attribute('textContent').strip()
+        if IsFloat(element_text):
+            return element_text
+        time.sleep(wait_time_per_retry)
+        retries -= 1
+    raise TimeoutException
+
+
+def WaitEqual(locator, string, time_in_secs=None, retries=5, wait_time_per_retry=1):
+    global g
+
+    if time_in_secs is None:
+        time_in_secs = g.wait_element
+    element = WebDriverWait(g.driver, time_in_secs).until(EC.visibility_of_element_located(locator))
+    while retries > 0:
+        element_text = element.get_attribute('textContent').strip()
+        if element_text == string:
+            return element
+        time.sleep(wait_time_per_retry)
+        retries -= 1
+    raise TimeoutException
+
+
+# Can raise TimeoutException if no Morningstar page for symbol
+def LoadMorningstarSymbolPage(symbol):
+    global g
+
+    # Load cached URLs (if cache file exists and not already loaded)
+    url_cache_filename = './tmp/url_cache.json'
+    if len(g.trading_symbol_urls) == 0:
+        if os.path.isfile(url_cache_filename):
+            with open(url_cache_filename) as json_file:
+                g.trading_symbol_urls = json.load(json_file)
+        else:
+            g.trading_symbol_urls = {}
+
+    # Retrieve page using autocomplete if no cached URL for symbol. Mark cache to flush to disk if a miss
+    url_info = g.trading_symbol_urls.get(symbol, None)
+    if url_info is None:
+        need_to_rewrite_urls = True
+        input_field = WaitClick((By.ID, 'AutoCompleteBox'), g.wait_page)
+        input_field.send_keys(symbol)
+        WaitEqual((By.XPATH, "//td[@class='ACDropDownStyle']//b"), symbol)
+        print('Loading Morningstar page for ' + symbol + '...')
+        input_field.send_keys(Keys.RETURN)
+
+    # Retrieve page from URL
+    else:
+        need_to_rewrite_urls = False
+        url_text = url_info['url']
+        print('Loading Morningstar page for ' + symbol + '...')
+        g.driver.get(url_text)
+
+    # Ensure that retrieved page matches expected trading symbol
+    WaitEqual((By.XPATH, "//span[contains(@class, 'symbol')]"), symbol, g.wait_page)
+
+    # Only update and rewrite URL cache if it changed
+    if need_to_rewrite_urls:
+        url_info = {
+            'timestamp': g.timestamp,
+            'url': g.driver.current_url
+        }
+        g.trading_symbol_urls[symbol] = url_info
+        with open(url_cache_filename, 'w') as json_file:
+            json.dump(g.trading_symbol_urls, json_file)
+
+    # We can determine the type of stat page retrieve (STOCK, MUTUAL, ETF) based on the top horizontal nav
+    # number of elements / menu-items
+    nav_lis = WebDriverWait(g.driver, g.wait_element).until(EC.presence_of_all_elements_located((By.XPATH,
+        "//ul[contains(@class, 'sal-nav-horizontal')]/li")))
+    count_nav_lis = len(nav_lis)
+    g.current_symbol_type = None
+    if count_nav_lis == 12:
+        g.current_symbol_type = 'STOCK'
+    elif count_nav_lis == 9:
+        g.current_symbol_type = 'MUTUAL'
+    elif count_nav_lis == 7:
+        g.current_symbol_type = 'ETF'
+    if g.current_symbol_type is None:
+        print('Error: ' + g.current_trading_symbol + " is of type 'None'.")
+    return g.current_symbol_type
 
 
 def IsFloat(s):
@@ -30,115 +141,112 @@ def IsFloat(s):
         return False
 
 
-def LoadMorningstarMain():
+def Quit():
     global g
 
-    # Load up symbols to be retrieved
-    g.symbols = []
-    if g.args.symbols_filename is not None:
-        with open(g.args.symbols_filename) as fp:
-           line = fp.readline().rstrip()
-           while line:
-               g.symbols.append(line)
-               line = fp.readline().rstrip()
-    if g.args.trading_symbols is not None:
-        for trading_symbol in g.args.trading_symbols:
-            g.symbols.append(trading_symbol)
-
-    chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_argument("--incognito")
-
-    # Uncommenting one line below determines if running incognito or not
-    g.driver = webdriver.Chrome('/Users/afraley/Documents/bin/chromedriver', chrome_options=chrome_options)
-#    g.driver = webdriver.Chrome('/Users/afraley/Documents/bin/chromedriver')
-
-    g.driver.set_window_size(1120, 550)
-
-    print('Gathering Morningstar data for these trading symbols: ' + ', '.join(g.symbols))
-    print('Navigating to Morningstar website')
-
-    # We've had problems with authentication, so loop until no authentication error
-    while True:
-        g.driver.get('http://erec.einetwork.net/dba-z/')
-        g.driver.find_element_by_xpath("//a[contains(@href,'morningstar')]/following-sibling::a").click()
-        time.sleep(3)
-        if not g.driver.find_elements_by_xpath("//*[contains(text(), 'Permission denied')]"):
-            if not g.driver.find_elements_by_xpath("//*[contains(text(), 'Error')]"):
-                break
+    if not g.args.live_window:
+        g.driver.quit()
+    util.sys_exit(0)
 
 
+def LoadMorningstarMainPage():
+    global g
 
+    g.driver.get('https://elibrary.einetwork.net/new-general-reference/new-consumer-business-resources/')
+    element = WebDriverWait(g.driver, g.wait_page).until(EC.visibility_of_element_located((By.XPATH, \
+        "//li[contains(@id,'eg-12-post-id-913')]")))
+    hover = ActionChains(g.driver).move_to_element(element)
+    hover.perform()
+    try:
+        WaitClick((By.XPATH, "//a[contains(@href, 'https://library.morningstar.com/remote.html')]"))
+    except TimeoutException:
+        print('Cannot load Morningstar launch page. Timed out. Aborting!')
+        Quit()
+    print('Loading Morningstar main page...')
+
+    # Switch to right-most tab
+    g.driver.switch_to.window(g.driver.window_handles[len(g.driver.window_handles)-1])
+
+    try:
+        element = WebDriverWait(g.driver, g.wait_page).until(EC.visibility_of_element_located((By.XPATH, "//body")))
+    except TimeoutException:
+        print('Cannot load Morningstar main page. Timed out. Aborting!')
+        Quit()
+
+    if element.get_attribute('textContent') == 'The page cannot be displayed because an internal server error' \
+        ' has occurred.':
+        print('Cannot load Morningstar main page. Server error. Aborting!')
+        Quit()
+
+
+def ScrapeMorningstarFundData():
+    global g
+
+    header_elems = WebDriverWait(g.driver, g.wait_element).until(EC.presence_of_all_elements_located((By.XPATH,
+        "//div[contains(@class, 'performance-annual-table')]/div/table[contains(@class, 'total-table')]/" \
+        "tbody/tr[1]/td")))
+    perf_elems = WebDriverWait(g.driver, g.wait_element).until(EC.presence_of_all_elements_located((By.XPATH,
+        "//div[contains(@class, 'performance-annual-table')]/div/table[contains(@class, 'total-table')]/" \
+        "tbody/tr[2]/td/span")))
+    StashSeleniumTableData(header_elems, perf_elems)
+
+    expense_ratio_text = g.driver.find_element_by_xpath("//div[contains(@class, 'sal-dp-name') " \
+        "and starts-with(., 'Expense Ratio')]/following-sibling::div").get_attribute('textContent').strip()
+    StashDataPoint(g.current_trading_symbol, 'Stats', 'Expense Ratio', expense_ratio_text)
+
+    WaitClick((By.XPATH, "//div[@ng-click='vm.toggleExpandedData()']"))
+    tax_cost_ratio_text = WaitFloat((By.XPATH, "//div[contains(@class, 'sal-mip-taxes__dp-name') and " \
+        "contains(., 'Fund')]/following-sibling::div"))
+    StashDataPoint(g.current_trading_symbol, 'Stats', '3-Year Tax Cost Ratio', tax_cost_ratio_text)
+
+
+def ScrapeMorningstarStockData():
+    global g
+
+    header_elems = WebDriverWait(g.driver, g.wait_element).until(EC.presence_of_all_elements_located((By.XPATH,
+        "//div[contains(@class, 'fairvalue-annual-table')]/div/table[contains(@class, 'total-table')]/" \
+        "tbody/tr[1]/td")))
+    perf_elems = WebDriverWait(g.driver, g.wait_element).until(EC.presence_of_all_elements_located((By.XPATH,
+        "//div[contains(@class, 'fairvalue-annual-table')]/div/table[contains(@class, 'total-table')]/" \
+        "tbody/tr[3]/td/span")))
+    StashSeleniumTableData(header_elems, perf_elems)
+
+
+def StashSeleniumTableData(header_elems, perf_elems):
+    index = 0
+    for header_elem in header_elems:
+        header_val = header_elem.get_attribute('textContent').strip()
+        perf_val = perf_elems[index].get_attribute('textContent').strip()
+        if IsFloat(perf_val):
+            StashDataPoint(g.current_trading_symbol, 'Total Returns', header_val, perf_val, '%')
+        index += 1
+
+
+# Can raise TimeoutException if no Morningstar page for symbol
 def GetMorningstarData():
     global g
 
-    tmp_json_filename = './tmp/TEST_DATA.json'
-    if os.path.isfile(tmp_json_filename):
-        with open(tmp_json_filename) as tmp_json_file:
-            g.investment_data = json.load(tmp_json_file)
-        print('Loaded JSON investment data from ' + tmp_json_filename)
-    else:
-        for g.current_trading_symbol in g.symbols:
-        
-            print('Navigating to Morningstar page for ' + g.current_trading_symbol)
-            input_field = g.driver.find_element_by_id('AutoCompleteBox')
-            input_field.click()
-            input_field.send_keys(g.current_trading_symbol)
-            input_field.send_keys(Keys.RETURN)
-            time.sleep(2)
+    for g.current_trading_symbol in g.symbols:
 
-            if g.driver.find_elements_by_xpath("//*[contains(text(), 'Having difficulties locating your security?')]"):
-                print('Morningstar has no data for trading symbol: ' + g.current_trading_symbol)
-                continue
+        # If we already retrieved stats data for symbol, don't retrieve again
+        if g.current_trading_symbol in g.investment_data:
+            print('Already have data for ' + g.current_trading_symbol + '. Skipping...')
+            continue
 
-            GetMorningstarTaxTabData()
+        if g.args.emit_debug_html:
+            print('Writing debug HTML')
+            emit_debug_html(g.driver.page_source)
 
-            # Because for some weird reason, sometimes cannot find '^History' node containing performance data,
-            # try 3 times (maybe just increase 'sleep' inside of GetMorningstarPerformanceTabData_Annual()?)
-            for retries in range(3):
-                try:
-                    GetMorningstarPerformanceTabData_Annual()
-                    break
-                except ValueError:
-                    print('Failed to find "^History" node in performance data HTML for ' + g.current_trading_symbol + \
-                        ' on try #' + str(retries + 1) + '. Retrying...')
-                    continue
+        try:
+            symbol_type = LoadMorningstarSymbolPage(g.current_trading_symbol)
+        except TimeoutException:
+            print("No Morningstar page found for " + g.current_trading_symbol + ". Skipping...")
+            continue
 
-            GetMorningstarPerformanceTabData_Trailing()
-            GetMorningstarDistributionTabData()
-
-    print(g.investment_data)
-
-    json_filename = './tmp/' + g.timestamp + '_investment_data.json'
-    with open(json_filename, 'w') as json_file:
-        json.dump(g.investment_data, json_file)
-
-    print('Results written to ' + json_filename + '\nDone!')
-
-
-def GetMorningstarTaxTabData():
-    global g
-
-    print('Retrieving tax data for ' + g.current_trading_symbol)
-
-    try:
-        tax_tab = g.driver.find_element_by_link_text('Tax')
-    except:
-        # Some trading symbols are stocks which don't have a "Tax" tab
-        print('No tax data for ' + g.current_trading_symbol)
-        return
-
-    tax_tab.click()
-    time.sleep(3)
-    if g.args.emit_debug_html:
-        emit_debug_html(g.driver.page_source)
-    g.soup = BeautifulSoup(g.driver.page_source.encode('utf-8'), 'html.parser')
-    td_elements = g.soup.find('th', text='Tax Cost Ratio').parent. \
-        next_sibling.next_sibling.next_sibling.next_sibling.find_all('td')
-    StashDataPoint(g.current_trading_symbol, 'Tax Cost Ratios', '1-Yr Tax Cost Ratio', td_elements[4].text)
-    StashDataPoint(g.current_trading_symbol, 'Tax Cost Ratios', '3-Yr Tax Cost Ratio', td_elements[5].text)
-    StashDataPoint(g.current_trading_symbol, 'Tax Cost Ratios', '5-Yr Tax Cost Ratio', td_elements[6].text)
-    StashDataPoint(g.current_trading_symbol, 'Tax Cost Ratios', '10-Yr Tax Cost Ratio', td_elements[7].text)
-    StashDataPoint(g.current_trading_symbol, 'Tax Cost Ratios', '15-Yr Tax Cost Ratio', td_elements[8].text)
+        if symbol_type == 'STOCK':
+            ScrapeMorningstarStockData()
+        elif symbol_type == 'ETF' or symbol_type == 'MUTUAL':
+            ScrapeMorningstarFundData()
 
 
 def StashDataSeriesItem(symbol, dataset_name, stat_name, timeframe, datum, suffix=''):
@@ -153,113 +261,17 @@ def StashDataSeriesItem(symbol, dataset_name, stat_name, timeframe, datum, suffi
 
 
 def StashDataPoint(symbol, dataset_name, stat_name, datum, suffix=''):
-    if IsFloat(datum) and float(datum) != 0.0:
+    if len(datum) > 1 and datum[-1] == '%':
+        datum = datum[:-1]
+        suffix = '%'
+    if IsFloat(datum):
         if symbol not in g.investment_data:
             g.investment_data[symbol] = {}
         if dataset_name not in g.investment_data[symbol]:
             g.investment_data[symbol][dataset_name] = {}
         g.investment_data[symbol][dataset_name][stat_name] = datum + suffix
-
-
-def GetMorningstarPerformanceTabData_Annual():
-    global g
-
-    print('Retrieving performance data for ' + g.current_trading_symbol)
-
-    try:
-        performance_tab = g.driver.find_element_by_link_text('Performance')
-    except:
-        print('No performance data for ' + g.current_trading_symbol)
-        return
-
-    performance_tab.click()
-    time.sleep(3)
-    if g.args.emit_debug_html:
-        emit_debug_html(g.driver.page_source)
-    g.soup = BeautifulSoup(g.driver.page_source.encode('utf-8'), 'html.parser')
-    elems = g.soup(text=re.compile(r'^History'))
-    if len(elems) != 1 or elems[0].parent.name != 'th':
-        raise ValueError("Errors finding proper 'History' <th> node")
-    tr_node = elems[0].parent.parent
-    year_intervals = [x.text for x in tr_node.find_all('th')[1:]]
-    tbody_node = tr_node.parent.next_sibling.next_sibling
-    year_stat_th_nodes = tbody_node.find_all('th')
-    output_data = {}
-    for year_stat_th_node in year_stat_th_nodes:
-        year_stat_name = FixStatName(g.current_trading_symbol, year_stat_th_node.text)
-        year_stat_values = [x.text for x in year_stat_th_node.parent.find_all('td')]
-        index = 0
-        for year_stat_value in year_stat_values:
-            if IsFloat(year_stat_value):
-                if not year_stat_name in output_data:
-                    output_data[year_stat_name] = {}
-                output_data[year_stat_name][year_intervals[index]] = year_stat_value
-                if year_intervals[index] != 'YTD':
-                    year = int(year_intervals[index])
-                    if g.perf_data_year_min > year:
-                        g.perf_data_year_min = year
-                    if g.perf_data_year_max < year:
-                        g.perf_data_year_max = year
-            index += 1
-
-    StashDataSet(g.current_trading_symbol, 'Annual Returns', output_data)
-
-
-def GetMorningstarPerformanceTabData_Trailing():
-    global g
-
-    print('Retrieving trailing performance data for ' + g.current_trading_symbol)
-
-    try:
-        monthly_tab = g.driver.find_element_by_link_text('Monthly')
-    except:
-        print('No monthly data for ' + g.current_trading_symbol)
-        return
-
-    monthly_tab.click()
-    time.sleep(3)
-    if g.args.emit_debug_html:
-        emit_debug_html(g.driver.page_source)
-
-    g.soup = BeautifulSoup(g.driver.page_source.encode('utf-8'), 'html.parser')
-    trp = g.soup(text=re.compile(r'Total Return %'))
-    if len(trp) < 1 or trp[len(trp)-1].parent.name != 'th':
-        raise ValueError("Error finding proper 'Total Return %' <th> node")
-
-    parent_text = trp[len(trp)-1].parent.text
-
-    # Get data "as of" date (close of market)
-    match = re.search(r'(?P<month>[0-9]+)/(?P<day>[0-9]+)/(?P<year>[0-9]+)', parent_text)
-    if match is not None:
-        date_string = 'Trailing Returns As Of ' + match.group('month') + '/' + match.group('day') + '/' + \
-            match.group('year')
     else:
-        return_as_of = g.soup(text=re.compile(r'return as of'))
-        return_as_of_string = return_as_of[len(return_as_of)-1].parent.text
-        match = re.search(r'(?P<month>[0-9]+)/(?P<day>[0-9]+)/(?P<year>[0-9]+)', return_as_of_string)
-        if match is not None:
-            date_string = 'Trailing Returns As Of ' + match.group('month') + '/' + match.group('day') + '/' + \
-                match.group('year')
-        else:
-            date_string = 'Trailing Returns As Of <unknown date...see file timestamp for approximate>'
-
-    tr_node = trp[len(trp)-1].parent.parent
-    intervals = [x.text for x in tr_node.find_all('th')[1:]]
-    tbody_node = tr_node.parent.next_sibling.next_sibling
-    stat_th_nodes = tbody_node.find_all('th')
-    output_data = {}
-    for stat_th_node in stat_th_nodes:
-        stat_name = FixStatName(g.current_trading_symbol, stat_th_node.text)
-        stat_values = [x.text for x in stat_th_node.parent.find_all('td')]
-        index = 0
-        for stat_value in stat_values:
-            if IsFloat(stat_value):
-                if not stat_name in output_data:
-                    output_data[stat_name] = {}
-                output_data[stat_name][intervals[index]] = stat_value
-            index += 1
-
-    StashDataSet(g.current_trading_symbol, date_string, output_data)
+        print("datum '" + datum + "'is not a float, unable to stash.")
 
 
 def StashDataSet(symbol, dataset_name, data):
@@ -275,110 +287,24 @@ def StashDataRow(symbol, dataset_name, stat_name, row_data, suffix=''):
         StashDataSeriesItem(symbol, dataset_name, stat_name, key, row_data[key], suffix)
 
 
-def GetMorningstarDistributionTabData():
+def emit_debug_html(s, standalone=False):
     global g
 
-    print('Retrieving distribution data for ' + g.current_trading_symbol)
-
-    try:
-        distributions_tab = g.driver.find_element_by_link_text('Distributions')
-    except:
-        print('No distribution data for ' + g.current_trading_symbol)
-        return
-
-    close_data = GetCloseData(g.current_trading_symbol)
-    distributions_tab.click()
-    time.sleep(3)
-    if g.args.emit_debug_html:
-        emit_debug_html(g.driver.page_source)
-    g.soup = BeautifulSoup(g.driver.page_source.encode('utf-8'), 'html.parser')
-    tbody = g.soup.find("div", {"id": "latestdisList"}).find("table").find("tbody")
-    output_data = {}
-    for tr in tbody.findAll("tr"):
-        th = tr.find("th")
-        if th is None:
-            continue
-        row_label = th.text.strip()
-        if re.search('Year to Date', row_label):
-            row_label = 'YTD'
-        data_entries = [x.text.strip() for x in tr.findAll("td")]
-        StashDataSeriesItem(g.current_trading_symbol, 'Distributions', 'Income', row_label, data_entries[0])
-        StashDataSeriesItem(g.current_trading_symbol, 'Distributions', 'Short-Term Capital Gain', row_label,
-            data_entries[1])
-        StashDataSeriesItem(g.current_trading_symbol, 'Distributions', 'Long-Term Capital Gain', row_label,
-            data_entries[2])
-        StashDataSeriesItem(g.current_trading_symbol, 'Distributions', 'Returned Capital', row_label, data_entries[3])
-        StashDataSeriesItem(g.current_trading_symbol, 'Distributions', 'Total Distributions', row_label,
-            data_entries[4])
-        StashDataSeriesItem(g.current_trading_symbol, 'Distributions', 'Closing Price', row_label,
-            close_data[row_label])
-
-
-def GetCloseData(s):
-    close_data = {}
-    curr_year = datetime.datetime.now().year
-    retry_num = 1
-    while True:
-        json_close_data_raw = requests.get('https://www.alphavantage.co/query?function=TIME_SERIES_MONTHLY_ADJUSTED&' +
-            'symbol=' + s + '&apikey=2QWVG0O8YL2AGWIM').json()
-        if not 'Monthly Adjusted Time Series' in json_close_data_raw:
-            if re.search('API call volume', str(json_close_data_raw)):
-                print('Error!  Exceeded AlphaVantage API call rate. Retrying in 10 secs...')
-                time.sleep(10)
-            else:
-                print('Error!  Unknown AlphaVantage API error.')
-                print(str(json_close_data_raw))
-                sys.exit(1)
-        else:
-            json_close_data = json_close_data_raw['Monthly Adjusted Time Series']
-            latest_close_date = next(iter(json_close_data))
-            close_data['YTD'] = json_close_data[latest_close_date]['4. close']
-            for year in range(curr_year - 6, curr_year):
-                december_key = GetDecemberKey(json_close_data.keys(), year)
-                if december_key is not None:
-                    close_data[str(year)] = json_close_data[december_key]['4. close']
-            return close_data
-
-
-def GetDecemberKey(keys, year):
-    match_string = '^' + str(year) + '-12'
-    for s in keys:
-        if re.match(match_string, s):
-            return s
-    return None
-
-
-def emit_debug_html(s):
-    global g
-
-    if g.debug_html_file is None:
+    if standalone or g.debug_html_file is None:
         if not(os.path.isdir('./tmp')):
             print('Temporary directory ' + os.path.abspath('./tmp') + ' must be present to emit debug HTML file. ' \
                 'Aborting!')
             sys.exit(1)
-        debug_html_filename = './tmp/' + g.timestamp + '_DEBUG.html'
-        g.debug_html_file = open(debug_html_filename, 'w')
-    g.debug_html_file.write(s)
-
-
-# Fake class only for purpose of limiting global namespace to the 'g' object
-class g:
-    args = None
-    header_written = False
-    driver = None
-    symbols = None
-    debug_html_file = None
-    tax_data_file = None
-    performance_data_file = None
-    current_trading_symbol = None
-    perf_data = {}
-    perf_data_year_min = 99999
-    perf_data_year_max = 0
-    timestamp = None
-    soup = None
-    dividend_data = {}
-    dividend_data_file = None
-    investment_data = {}
+        debug_html_filename = './tmp/' + g.timestamp + '_' + str(g.debug_file_incrementor).zfill(3) + '_DEBUG.html'
+        g.debug_file_incrementor += 1
+        debug_html_file = open(debug_html_filename, 'w')
+        print('Writing page HTML to ' + debug_html_filename + '.')
+    else:
+        print('Appending page HTML to ' + g.debug_html_filename + '.')
+    debug_html_file.write(s)
+    if not standalone and g.debug_html_file is None:
+        g.debug_html_filename = debug_html_filename
+        g.debug_html_file = debug_html_file
 
 
 def main(argv):
@@ -386,14 +312,6 @@ def main(argv):
     global g
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--tax-cost-filename', required=False, type=argparse.FileType('w'), 
-        help='Output tax cost ratio data TSV filename. Defaults to ./[datetime_stamp]_morningstar_tax_cost_data.tsv')
-    parser.add_argument('--performance-filename', required=False, type=argparse.FileType('w'), 
-        help='Output tax cost ratio data TSV filename. Defaults to ' \
-            './[datetime_stamp]_morningstar_performance_data.tsv')
-    parser.add_argument('--dividend-filename', required=False, type=argparse.FileType('w'), 
-        help='Output dividend data TSV filename. Defaults to ' \
-            './[datetime_stamp]_morningstar_dividend_data.tsv')
     parser.add_argument('--message-output-filename', required=False, help='Filename of message output file. If ' +
         'unspecified, defaults to stderr')
     parser.add_argument('--trading-symbols', required=False, nargs='+',
@@ -402,6 +320,9 @@ def main(argv):
     parser.add_argument('--emit-debug-html', action='store_true', help='If specified, then a ' \
         'debug_yyyymmddhhmmss.html file is created to allow Javascript-retrieved HTML to be available for ' \
         'inspection.')
+    parser.add_argument('--live-window', action='store_true', help='If specified, then ' \
+        "webdriver runs without '--headless' option and browser window is left open at the end of the run.")
+    parser.add_argument('--append-results', required=False, help='Output .json results file from a prior run.')
     g.args = parser.parse_args()
 
     message_level = 'Info'
@@ -414,15 +335,62 @@ def main(argv):
 
     g.timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
 
-    LoadMorningstarMain()
-    time.sleep(3)
+    g.symbols = []
+    if g.args.symbols_filename is not None:
+        with open(g.args.symbols_filename) as fp:
+            line = fp.readline().rstrip()
+            while line:
+                g.symbols.append(line)
+                line = fp.readline().rstrip()
+    if g.args.trading_symbols is not None:
+        for trading_symbol in g.args.trading_symbols:
+            g.symbols.append(trading_symbol)
+
+    if g.args.append_results is not None:
+        if os.path.isfile(g.args.append_results):
+            with open(g.args.append_results) as json_file:
+                g.investment_data = json.load(json_file)
+
+    print('Gathering Morningstar data for these trading symbols: ' + ', '.join(g.symbols))
+
+    # Establish Chrome browser option set
+    chrome_options = webdriver.ChromeOptions()
+    chrome_options.add_argument("--incognito")
+    if not g.args.live_window:
+        chrome_options.add_argument("--headless")
+
+    # Uncommenting one line below determines if running incognito or not
+    g.driver = webdriver.Chrome('/Users/afraley/Documents/bin/chromedriver', options=chrome_options)
+    #g.driver = webdriver.Chrome('/Users/afraley/Documents/bin/chromedriver')
+    g.driver.set_window_size(1120, 550)
+
+    LoadMorningstarMainPage()
     GetMorningstarData()
 
+    # Report on any missing symbols
+    missing_symbols = []
+    for symbol in g.symbols:
+        if symbol not in g.investment_data.keys():
+            missing_symbols.append(symbol)
+    if len(missing_symbols) > 0:
+        print('Morningstar data could not be pulled for the following symbols: ' + ', '.join(missing_symbols))
+
+    # If we have collected data to write...
+    if len(g.investment_data) > 0:
+        print(g.investment_data)
+        json_filename = './tmp/' + g.timestamp + '_investment_data.json'
+        with open(json_filename, 'w') as json_file:
+            json.dump(g.investment_data, json_file)
+        print('Results written to ' + json_filename + '\nDone!')
+    else:
+        print('No data collected. Exiting!')
+
+    # If we have debug HTML page(s) to write
     if g.debug_html_file is not None:
         g.debug_html_file.close()
 
-    g.driver.quit()
-    util.sys_exit(0)
+    # Clean up and exit, flushing error messages
+    Quit()
 
 
 if __name__ == "__main__":

@@ -2,15 +2,9 @@
 
 import argparse
 from util import util
-import datetime
 import sys
 import os
-import time
 import re
-from selenium import webdriver
-from selenium.webdriver.common.keys import Keys
-from bs4 import BeautifulSoup
-import requests
 import json
 import csv
 
