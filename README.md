@@ -23,14 +23,14 @@ List datasets and then extract the "Total Return" dataset as CSV from investment
 
 Tested with following utilities/version.
 
-Utility    Version
-=======    =======
-Python     3.8.2
-pip        20.0.2
-pip        20.0.2
-selenium   3.141.0
-setuptools 41.2.0
-urllib3    1.25.9 
+| Utility    | Version |
+|------------|---------|
+| Python     | 3.8.2   |
+| pip        | 20.0.2  |
+| pip        | 20.0.2  |
+| selenium   | 3.141.0 |
+| setuptools | 41.2.0  |
+| urllib3    | 1.25.9  |
 
 To set up local environment:
 - A local venv subdirectory created using python3 -m venv venv
