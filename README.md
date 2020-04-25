@@ -27,7 +27,6 @@ Tested with following utilities/version.
 |------------|---------|
 | Python     | 3.8.2   |
 | pip        | 20.0.2  |
-| pip        | 20.0.2  |
 | selenium   | 3.141.0 |
 | setuptools | 41.2.0  |
 | urllib3    | 1.25.9  |
