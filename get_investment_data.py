@@ -13,6 +13,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
+from webdriver_manager.chrome import ChromeDriverManager
 import json
 
 
@@ -360,7 +361,8 @@ def main(argv):
         chrome_options.add_argument("--headless")
 
     # Uncommenting one line below determines if running incognito or not
-    g.driver = webdriver.Chrome('/Users/afraley/Documents/bin/chromedriver', options=chrome_options)
+    g.driver = webdriver.Chrome(ChromeDriverManager().install(), options=chrome_options)
+    #g.driver = webdriver.Chrome('/Users/afraley/Documents/bin/chromedriver', options=chrome_options)
     #g.driver = webdriver.Chrome('/Users/afraley/Documents/bin/chromedriver')
     g.driver.set_window_size(1120, 550)
 
